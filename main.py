@@ -32,6 +32,45 @@ def xml_document(keystrokes: List[Keystroke]) -> bytes:
     return ET.tostring(ledger, encoding="utf-8", xml_declaration=True)
 
 
+def parse_xml_document(data: bytes) -> List[Keystroke]:
+    ledger = ET.fromstring(data)
+    if ledger.tag != "ledger":
+        raise ValueError("The XML root element must be <ledger>.")
+
+    keystrokes = []
+    for entry in ledger:
+        if entry.tag != "keystroke":
+            raise ValueError("Each child of <ledger> must be a <keystroke>.")
+        key = entry.findtext("key")
+        timestamp = entry.findtext("timestamp")
+        value_text = entry.findtext("ascii_value")
+        if key is None or timestamp is None or value_text is None:
+            raise ValueError("Each <keystroke> must contain key, timestamp, and ascii_value.")
+        try:
+            value = int(value_text)
+        except ValueError as error:
+            raise ValueError("Each ascii_value must be an integer.") from error
+        if value < -1 or value > 127:
+            raise ValueError("Each ascii_value must be -1 or an ASCII value from 0 to 127.")
+        keystrokes.append(Keystroke(key, timestamp, value))
+    return keystrokes
+
+
+def text_from_keystrokes(keystrokes: List[Keystroke]) -> str:
+    characters = []
+    for keystroke in keystrokes:
+        if keystroke.key == "BackSpace" or keystroke.ascii_value == 8:
+            if characters:
+                characters.pop()
+        elif keystroke.ascii_value in (10, 13):
+            characters.append("\n")
+        elif keystroke.ascii_value == 9:
+            characters.append("\t")
+        elif 32 <= keystroke.ascii_value <= 126:
+            characters.append(chr(keystroke.ascii_value))
+    return "".join(characters)
+
+
 class Humanpad:
     def __init__(self, root: tk.Tk) -> None:
         self.root = root
@@ -48,11 +87,13 @@ class Humanpad:
 
         menu_bar = tk.Menu(root)
         file_menu = tk.Menu(menu_bar, tearoff=False)
+        file_menu.add_command(label="Import...", command=self.import_file, accelerator="Ctrl+O")
         file_menu.add_command(label="Save As...", command=self.save_as, accelerator="Ctrl+S")
         file_menu.add_separator()
         file_menu.add_command(label="Exit", command=root.destroy)
         menu_bar.add_cascade(label="File", menu=file_menu)
         root.configure(menu=menu_bar)
+        root.bind("<Control-o>", self.import_file)
         root.bind("<Control-s>", self.save_as)
 
     def record_keystroke(self, event: tk.Event) -> None:
@@ -63,6 +104,31 @@ class Humanpad:
                 ascii_value=ascii_value(event.char),
             )
         )
+
+    def import_file(self, _event: Optional[tk.Event] = None) -> None:
+        path = filedialog.askopenfilename(
+            parent=self.root,
+            title="Import XML ledger",
+            filetypes=[("XML files", "*.xml"), ("All files", "*.*")],
+        )
+        if not path:
+            return
+
+        try:
+            with open(path, "rb") as file:
+                keystrokes = parse_xml_document(file.read())
+        except (OSError, ET.ParseError, ValueError) as error:
+            messagebox.showerror(
+                "Import failed",
+                f"Could not import the XML ledger:\n{error}",
+                parent=self.root,
+            )
+            return
+
+        self.keystrokes = keystrokes
+        self.text.delete("1.0", "end")
+        self.text.insert("1.0", text_from_keystrokes(keystrokes))
+        self.root.title(f"Humanpad - {path}")
 
     def save_as(self, _event: Optional[tk.Event] = None) -> None:
         path = filedialog.asksaveasfilename(
